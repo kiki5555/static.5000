@@ -1,422 +1,239 @@
-<?php
-/**
- * The Unzipper extracts .zip or .rar archives and .gz files on webservers.
- * It's handy if you do not have shell access. E.g. if you want to upload a lot
- * of files (php framework or image collection) as an archive to save time.
- * As of version 0.1.0 it also supports creating archives.
- *
- * @author  Andreas Tasch, at[tec], attec.at
- * @license GNU GPL v3
- * @package attec.toolbox
- * @version 0.1.1
- */
-define('VERSION', '0.1.1');
-
-$timestart = microtime(TRUE);
-$GLOBALS['status'] = array();
-
-$unzipper = new Unzipper;
-if (isset($_POST['dounzip'])) {
-  // Check if an archive was selected for unzipping.
-  $archive = isset($_POST['zipfile']) ? strip_tags($_POST['zipfile']) : '';
-  $destination = isset($_POST['extpath']) ? strip_tags($_POST['extpath']) : '';
-  $unzipper->prepareExtraction($archive, $destination);
-}
-
-if (isset($_POST['dozip'])) {
-  $zippath = !empty($_POST['zippath']) ? strip_tags($_POST['zippath']) : '.';
-  // Resulting zipfile e.g. zipper--2016-07-23--11-55.zip.
-  $zipfile = 'zipper-' . date("Y-m-d--H-i") . '.zip';
-  Zipper::zipDir($zippath, $zipfile);
-}
-
-$timeend = microtime(TRUE);
-$time = round($timeend - $timestart, 4);
-
-/**
- * Class Unzipper
- */
-class Unzipper {
-  public $localdir = '.';
-  public $zipfiles = array();
-
-  public function __construct() {
-    // Read directory and pick .zip, .rar and .gz files.
-    if ($dh = opendir($this->localdir)) {
-      while (($file = readdir($dh)) !== FALSE) {
-        if (pathinfo($file, PATHINFO_EXTENSION) === 'zip'
-          || pathinfo($file, PATHINFO_EXTENSION) === 'gz'
-          || pathinfo($file, PATHINFO_EXTENSION) === 'rar'
-        ) {
-          $this->zipfiles[] = $file;
-        }
-      }
-      closedir($dh);
-
-      if (!empty($this->zipfiles)) {
-        $GLOBALS['status'] = array('info' => '.zip or .gz or .rar files found, ready for extraction');
-      }
-      else {
-        $GLOBALS['status'] = array('info' => 'No .zip or .gz or rar files found. So only zipping functionality available.');
-      }
-    }
-  }
-
-  /**
-   * Prepare and check zipfile for extraction.
-   *
-   * @param string $archive
-   *   The archive name including file extension. E.g. my_archive.zip.
-   * @param string $destination
-   *   The relative destination path where to extract files.
-   */
-  public function prepareExtraction($archive, $destination = '') {
-    // Determine paths.
-    if (empty($destination)) {
-      $extpath = $this->localdir;
-    }
-    else {
-      $extpath = $this->localdir . '/' . $destination;
-      // Todo: move this to extraction function.
-      if (!is_dir($extpath)) {
-        mkdir($extpath);
-      }
-    }
-    // Only local existing archives are allowed to be extracted.
-    if (in_array($archive, $this->zipfiles)) {
-      self::extract($archive, $extpath);
-    }
-  }
-
-  /**
-   * Checks file extension and calls suitable extractor functions.
-   *
-   * @param string $archive
-   *   The archive name including file extension. E.g. my_archive.zip.
-   * @param string $destination
-   *   The relative destination path where to extract files.
-   */
-  public static function extract($archive, $destination) {
-    $ext = pathinfo($archive, PATHINFO_EXTENSION);
-    switch ($ext) {
-      case 'zip':
-        self::extractZipArchive($archive, $destination);
-        break;
-      case 'gz':
-        self::extractGzipFile($archive, $destination);
-        break;
-      case 'rar':
-        self::extractRarArchive($archive, $destination);
-        break;
-    }
-
-  }
-
-  /**
-   * Decompress/extract a zip archive using ZipArchive.
-   *
-   * @param $archive
-   * @param $destination
-   */
-  public static function extractZipArchive($archive, $destination) {
-    // Check if webserver supports unzipping.
-    if (!class_exists('ZipArchive')) {
-      $GLOBALS['status'] = array('error' => 'Error: Your PHP version does not support unzip functionality.');
-      return;
-    }
-
-    $zip = new ZipArchive;
-
-    // Check if archive is readable.
-    if ($zip->open($archive) === TRUE) {
-      // Check if destination is writable
-      if (is_writeable($destination . '/')) {
-        $zip->extractTo($destination);
-        $zip->close();
-        $GLOBALS['status'] = array('success' => 'Files unzipped successfully');
-      }
-      else {
-        $GLOBALS['status'] = array('error' => 'Error: Directory not writeable by webserver.');
-      }
-    }
-    else {
-      $GLOBALS['status'] = array('error' => 'Error: Cannot read .zip archive.');
-    }
-  }
-
-  /**
-   * Decompress a .gz File.
-   *
-   * @param string $archive
-   *   The archive name including file extension. E.g. my_archive.zip.
-   * @param string $destination
-   *   The relative destination path where to extract files.
-   */
-  public static function extractGzipFile($archive, $destination) {
-    // Check if zlib is enabled
-    if (!function_exists('gzopen')) {
-      $GLOBALS['status'] = array('error' => 'Error: Your PHP has no zlib support enabled.');
-      return;
-    }
-
-    $filename = pathinfo($archive, PATHINFO_FILENAME);
-    $gzipped = gzopen($archive, "rb");
-    $file = fopen($destination . '/' . $filename, "w");
-
-    while ($string = gzread($gzipped, 4096)) {
-      fwrite($file, $string, strlen($string));
-    }
-    gzclose($gzipped);
-    fclose($file);
-
-    // Check if file was extracted.
-    if (file_exists($destination . '/' . $filename)) {
-      $GLOBALS['status'] = array('success' => 'File unzipped successfully.');
-
-      // If we had a tar.gz file, let's extract that tar file.
-      if (pathinfo($destination . '/' . $filename, PATHINFO_EXTENSION) == 'tar') {
-        $phar = new PharData($destination . '/' . $filename);
-        if ($phar->extractTo($destination)) {
-          $GLOBALS['status'] = array('success' => 'Extracted tar.gz archive successfully.');
-          // Delete .tar.
-          unlink($destination . '/' . $filename);
-        }
-      }
-    }
-    else {
-      $GLOBALS['status'] = array('error' => 'Error unzipping file.');
-    }
-
-  }
-
-  /**
-   * Decompress/extract a Rar archive using RarArchive.
-   *
-   * @param string $archive
-   *   The archive name including file extension. E.g. my_archive.zip.
-   * @param string $destination
-   *   The relative destination path where to extract files.
-   */
-  public static function extractRarArchive($archive, $destination) {
-    // Check if webserver supports unzipping.
-    if (!class_exists('RarArchive')) {
-      $GLOBALS['status'] = array('error' => 'Error: Your PHP version does not support .rar archive functionality. <a class="info" href="http://php.net/manual/en/rar.installation.php" target="_blank">How to install RarArchive</a>');
-      return;
-    }
-    // Check if archive is readable.
-    if ($rar = RarArchive::open($archive)) {
-      // Check if destination is writable
-      if (is_writeable($destination . '/')) {
-        $entries = $rar->getEntries();
-        foreach ($entries as $entry) {
-          $entry->extract($destination);
-        }
-        $rar->close();
-        $GLOBALS['status'] = array('success' => 'Files extracted successfully.');
-      }
-      else {
-        $GLOBALS['status'] = array('error' => 'Error: Directory not writeable by webserver.');
-      }
-    }
-    else {
-      $GLOBALS['status'] = array('error' => 'Error: Cannot read .rar archive.');
-    }
-  }
-
-}
-
-/**
- * Class Zipper
- *
- * Copied and slightly modified from http://at2.php.net/manual/en/class.ziparchive.php#110719
- * @author umbalaconmeogia
- */
-class Zipper {
-  /**
-   * Add files and sub-directories in a folder to zip file.
-   *
-   * @param string $folder
-   *   Path to folder that should be zipped.
-   *
-   * @param ZipArchive $zipFile
-   *   Zipfile where files end up.
-   *
-   * @param int $exclusiveLength
-   *   Number of text to be exclusived from the file path.
-   */
-  private static function folderToZip($folder, &$zipFile, $exclusiveLength) {
-    $handle = opendir($folder);
-
-    while (FALSE !== $f = readdir($handle)) {
-      // Check for local/parent path or zipping file itself and skip.
-      if ($f != '.' && $f != '..' && $f != basename(__FILE__)) {
-        $filePath = "$folder/$f";
-        // Remove prefix from file path before add to zip.
-        $localPath = substr($filePath, $exclusiveLength);
-
-        if (is_file($filePath)) {
-          $zipFile->addFile($filePath, $localPath);
-        }
-        elseif (is_dir($filePath)) {
-          // Add sub-directory.
-          $zipFile->addEmptyDir($localPath);
-          self::folderToZip($filePath, $zipFile, $exclusiveLength);
-        }
-      }
-    }
-    closedir($handle);
-  }
-
-  /**
-   * Zip a folder (including itself).
-   *
-   * Usage:
-   *   Zipper::zipDir('path/to/sourceDir', 'path/to/out.zip');
-   *
-   * @param string $sourcePath
-   *   Relative path of directory to be zipped.
-   *
-   * @param string $outZipPath
-   *   Relative path of the resulting output zip file.
-   */
-  public static function zipDir($sourcePath, $outZipPath) {
-    $pathInfo = pathinfo($sourcePath);
-    $parentPath = $pathInfo['dirname'];
-    $dirName = $pathInfo['basename'];
-
-    $z = new ZipArchive();
-    $z->open($outZipPath, ZipArchive::CREATE);
-    $z->addEmptyDir($dirName);
-    if ($sourcePath == $dirName) {
-      self::folderToZip($sourcePath, $z, 0);
-    }
-    else {
-      self::folderToZip($sourcePath, $z, strlen("$parentPath/"));
-    }
-    $z->close();
-
-    $GLOBALS['status'] = array('success' => 'Successfully created archive ' . $outZipPath);
-  }
-}
-?>
 
 <!DOCTYPE html>
-<html>
+<html ⚡ lang="id" itemscope="itemscope" itemtype="https://schema.org/WebPage">
 <head>
-  <title>File Unzipper + Zipper</title>
-  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-  <style type="text/css">
-    <!--
-    body {
-      font-family: Arial, sans-serif;
-      line-height: 150%;
-    }
-
-    label {
-      display: block;
-      margin-top: 20px;
-    }
-
-    fieldset {
-      border: 0;
-      background-color: #EEE;
-      margin: 10px 0 10px 0;
-    }
-
-    .select {
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+<title itemprop="mainEntityOfPage">SV388 Situs Sabung Ayam Online Terpercaya</title>
+<meta name="description" content="Sv388 adalah salah satu situs resmi judi sabung ayam online Terpecaya yang menyediakan layanan daftar sv388 dan link alternatif sv388 login apk terbaru." />
+<link rel="canonical" href="https://goals.ecg.njg.engineering.virginia.edu/sv388/" />
+<link rel="shortcut icon" href="https://res.cloudinary.com/izibet303/image/upload/v1634840313/fav_ybnwte.png" sizes="16x16">
+<link href="https://goals.ecg.njg.engineering.virginia.edu/sv388/" rel="dns-prefetch">
+<link rel="preload" href="assets/fonts/BebasNeue.woff2" as="font" type="font/woff2" crossorigin>
+<meta name="keywords" content="sv388, daftar sv388, judi sv388, sabung ayam online, sabung ayam sv388, sabung ayam 24 jam, situs sv388, sabung ayam live, sabung ayam terpercaya" />
+<meta name="google" content="notranslate" />
+<meta name="robots" content="index, follow" />
+<meta name="rating" content="general" />
+<meta name="geo.region" content="id_ID" />
+<meta name="googlebot" content="index,follow">
+<meta name="geo.country" content="id" />
+<meta name="language" content="Id-ID" />
+<meta name="distribution" content="global" />
+<meta name="geo.placename" content="Indonesia" />
+<meta name="author" content="sv388" />
+<meta name="publisher" content="sv388" />
+<meta property="og:type" content="website" />
+<meta property="og:locale" content="id_ID" />
+<meta property="og:locale:alternate" content="en_ID"/>
+<meta property="og:title" content="SV388 Situs Sabung Ayam Online Terpercaya" />
+<meta property="og:description" content="Sv388 adalah salah satu situs resmi judi sabung ayam online Terpecaya yang menyediakan layanan daftar sv388 dan link alternatif sv388 login apk terbaru." />
+<meta property="og:url" content="https://goals.ecg.njg.engineering.virginia.edu/sv388/">
+<meta property="og:site_name" content="sv388" />
+<meta property="og:image" content="https://iforum-sg.c.huawei.com/dddd/id/images/2023/3/20/d93684b5-a29e-48d0-b9fd-3074452073d8.jpg"/>
+<meta property="og:image:alt" content="sv388" />
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@sv388">
+<meta name="twitter:creator" content="@sv388">
+<meta name="twitter:domain" content="https://goals.ecg.njg.engineering.virginia.edu/sv388/">
+<meta name="twitter:title" content="SV388 Situs Sabung Ayam Online Terpercaya" />
+<meta name="twitter:description" content="Sv388 adalah salah satu situs resmi judi sabung ayam online Terpecaya yang menyediakan layanan daftar sv388 dan link alternatif sv388 login apk terbaru."/>
+<meta name="google-site-verification" content="Zb-LjWgnlztyemUnB5K0GDEYx8yhsA9jWzsab6eEfkE" />
+<meta name="twitter:image" content="https://iforum-sg.c.huawei.com/dddd/id/images/2023/3/20/d93684b5-a29e-48d0-b9fd-3074452073d8.jpg"/>
+<script async="async" custom-element="amp-carousel" src="https://cdn.ampproject.org/v0/amp-carousel-0.1.js"></script>
+<link rel="preload" as="script" href="https://cdn.ampproject.org/v0.js">
+ <style amp-boilerplate>body{-webkit-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-moz-animation:-amp-start 8s steps(1,end) 0s 1 normal both;-ms-animation:-amp-start 8s steps(1,end) 0s 1 normal both;animation:-amp-start 8s steps(1,end) 0s 1 normal both}@-webkit-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-moz-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-ms-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@-o-keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}@keyframes -amp-start{from{visibility:hidden}to{visibility:visible}}</style><noscript>
+ <style amp-boilerplate>body{-webkit-animation:none;-moz-animation:none;-ms-animation:none;animation:none}</style></noscript> 
+<style amp-custom>
+@font-face{font-family:BebasNeue;src:local("BebasNeue"),url(https://goals.ecg.njg.engineering.virginia.edu/sv388/) format("woff"),url(https://goals.ecg.njg.engineering.virginia.edu/sv388/) format("truetype"),url(https://goals.ecg.njg.engineering.virginia.edu/sv388/) format("embedded-opentype")}html{font-family:sans-serif;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%}a,body,center,div,em,kolongramen,h1,h2,h3,h4,h5,h6,header,html,iframe,img,li,menu,nav,ol,p,span,table,tbody,td,tfoot,th,thead,tr,ul{margin:0;padding:0;border:0;font-size:100%;font:inherit;vertical-align:baseline}a,a:active,a:focus{outline:0;text-decoration:none}a{color:#fff}*{padding:0;margin:0;-moz-box-sizing:border-box;-webkit-box-sizing:border-box;box-sizing:border-box}h1,h2,h3,h4,h5,h6{margin-top:0;margin-bottom:.5rem}p{margin:0 0 10px}p{margin-top:0;margin-bottom:1rem}.clear{clear:both}.konten-bola{text-align:center}.align-middle{vertical-align:middle}body{background-color:#020202}.container{padding-right:15px;padding-left:15px;margin-right:auto;margin-left:auto}.marquee-text{height:auto;display:block;line-height:30px;overflow:hidden;position:relative}.marquee-text div{height:auto;line-height:22px;font-size:13px;white-space:nowrap;color:#fff;z-index:1;font-weight:600;font-family:Raleway;animation:marquee 20s linear infinite;margin-top:3px}.marquee-text:hover div{animation-play-state:paused}@keyframes marquee{0%{transform:translateX(100%)}100%{transform:translateX(-100%)}}.btn{display:inline-block;padding:6px 12px;touch-action:manipulation;cursor:pointer;user-select:none;background-image:none;border:1px solid transparent;border-radius:5px;font:250 22px Calibri;width:100%;color:#fff;text-shadow:0 0 3px #000;letter-spacing:1px}.login-judi{background:linear-gradient(to bottom,#063a52 0,#774200 100%);transition:all .4s}.login-judi:hover{opacity:.7}.daftar-judi{background:linear-gradient(to bottom,#774200 0,#063a52 100%);animation:blinking 0.5s infinite;transition:all .4s}@keyframes blinking{0%{border:5px solid #fff}100%{border:5px solid #063a52}}.bola-casino{animation-name:blinker;animation-duration:1s;animation-timing-function:linear;animation-iteration-count:infinite}.carousel {position: relative}.carousel-inner {position: relative; width: 100%; overflow: hidden}.banner {position: relative;width: 100%;padding-top: calc(100%*380/2000);margin: auto}.banner .carousel {position: absolute;top: 0;left: 0; right: 0;bottom: 0}.anim{animation:blinkings 1s infinite}@keyframes blinkings{0%{border:2px solid #fff}100%{border:2px solid #063a52}}@media (min-width:768px){.container{max-width:720px}}@media (min-width:992px){.container{max-width:960px}}@media (min-width:1200px){.container{width:1000px}}.row{display:-ms-flexbox;display:flex;-ms-flex-wrap:wrap;flex-wrap:wrap;margin-right:-15px;margin-left:-15px}.p-0{padding:0}.col-md-12,.col-md-4,.col-md-6,.col-md-8,.col-xs-6{position:relative;width:100%;padding-right:15px;padding-left:15px}.col-xs-6{float:left;width:50%}@media (min-width:768px){.col-md-4{-ms-flex:0 0 33.333333%;flex:0 0 33.333333%;max-width:33.333333%}.col-md-6{-ms-flex:0 0 50%;flex:0 0 50%;max-width:50%}.col-md-8{-ms-flex:0 0 66.666667%;flex:0 0 66.666667%;max-width:66.666667%}.col-md-12{-ms-flex:0 0 100%;flex:0 0 100%;width:100%}.order-first{-ms-flex-order:-1;order:-1}.logomobi{display:none}.logform{padding-top:2rem}.nopadding{padding:0}}@media (max-width:768px){.logo{display:none}.navbar{position:fixed}.content{padding-top:82px}.border-bt{border-bottom:1px solid #063a52;border-top:1px solid #063a52;padding:5px 15px}}.pt-1,.py-1{padding-top:.25rem}.pb-1,.py-1{padding-bottom:.25rem}.pt-2,.py-2{padding-top:.5rem}.pb-2,.py-2{padding-bottom:.5rem}.mt-2,.my-2{margin-top:.5rem}.mb-2,.my-2{margin-bottom:.5rem}.tukangcopy,.my-3{margin-top:.75rem}.mb-3,.my-3{margin-bottom:.75rem}.mt-4{margin-top:1.1rem}.mt-5,.my-5{margin-top:2rem}.mb-5,.my-5{margin-bottom:2rem}.pb-5{padding-bottom:1.25rem}.mx-5{margin-left:.75rem;margin-right:.75rem}.pt-3{padding-top:1rem}.pt-5{padding-top:2rem}.navbar{background-color:#000;right:0;left:0;z-index:1030;width:100%;float:left;padding:5px}.bg-blue{background-color:#020202}.bottom{float:left;width:100%}.konten{color:#fff;padding:20px 30px;border-radius:5px;font-family:Calibri;box-shadow:0 0 8px 4px #063a52}.konten h1{font-size:1.5em}.konten h2{font-size:1.3em}.konten h3{font-size:1.1em}.konten p{font-size:1em}.konten a{color:#063a52}.list{margin-bottom:1rem}ul li{display:inline;padding:0 8px;border-right:1px solid #fff}ul li:last-child{border:none}.kolongramen{text-decoration:none;color:#fff}.kolongramen a{color:#063a52}.slide{width:100%;border:2px solid #063a52;border-radius:4px;box-shadow:0 0 3px 0 #9140d6}.lc-atribut{border:2px solid #9140d6;border-radius:4px;box-shadow:0 0 5px 0 #9140d6}ul{color:#fff;text-align:left}.faq-label{display:flex;font-size:1.5em;justify-content:space-between;padding:1em;margin:12px 0 0;background:#063a52}.faq-answer{padding:1em;font-size:1.19em;color:#fff;text-align:justify;background:#212121;transition:all .35s}.qiuonline{text-align: center;font-size:1.5em;justify-content:space-between;padding:1em;margin:12px 0 0;background:#063a52}.list{margin-bottom:1rem}ul li{display:inline;padding:0 8px;border-right:1px solid #fff}ul li:last-child{border:none}.silau{border-radius:10px;box-shadow:0 0 10px 2px #965800;animation:blinking 0.3s infinite;transition:all .1s}.silau:hover{opacity:1}.tengah{width:40%;margin: auto;}.table-dark{color:#fff;background-color:#343a40}.table-dark td,.table-dark th,.table-dark thead th{text-transform:uppercase;border-color:#454d55;text-align:center;font-family:arial;vertical-align:middle}.table-dark.table-bordered{border:0}.table-dark.table-striped tbody tr:nth-of-type(odd){background-color:rgba(255,255,255,.05)}.table-dark.table-hover tbody tr:hover{color:#fff;background-color:rgba(255,255,255,.075)}.table-responsive{width:100%;padding:0;display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}.table-responsive a{text-decoration:none}.table-responsive a:hover{text-decoration:none}.table-dark td{vertical-align:middle}.d-none{display:none}@media (min-width:576px){.d-sm-table-cell{display:table-cell}}.button{display:inline;align-items:center;background:#000;width:100%;border-radius:5px;height:38px;cursor:pointer;padding:5px 20px;max-width:128px;color:rgb(255 255 255);font-weight:700;font-family:arial;text-transform:uppercase;text-decoration:none;transition:background .3s,transform .3s,box-shadow .3s;will-change:transform;min-width:80px;border:0px solid rgb(255 255 255);line-height:12px;animation:blinking 0.5s infinite;transition:all .4s}.button:hover{color:#e7b10c;font-weight:700;text-decoration:none;background:rgb(255 255 255);cursor:pointer;box-shadow:0 4px 17px rgba(0,0,0,.2);transform:translate3d(0,-2px,0);border:2px solid #e7b10c}.button:active{box-shadow:0 1px 1px 0 rgba(0,0,0,.1);transform:translate3d(0,1px,0)}a{background-color:transparent}a:active,a:hover{outline:0}h1{margin:.67em 0;font-size:2em}img{border:0}table{border-spacing:0;border-collapse:collapse}td,th{padding:0}@media print{*,:after,:before{color:#000;text-shadow:none;background:0 0;-webkit-box-shadow:none;box-shadow:none}a,a:visited{text-decoration:underline}a[href]:after{content:" (" attr(href) ")"}thead{display:table-header-group}img,tr{page-break-inside:avoid}img{max-width:100%}h2,h3,p{orphans:3;widows:3}h2,h3{page-break-after:avoid}.table{border-collapse:collapse}.table td,.table th{background-color:#fff}.table-bordered td,.table-bordered th{border:1px solid #ddd}}.table{width:100%;max-width:100%;margin-bottom:20px}.table>tbody>tr>td,.table>thead>tr>th{padding:18px 0;line-height:1.42857143;vertical-align:top;border-top:1px solid #ddd}.table>thead>tr>th{vertical-align:bottom;border-bottom:2px solid #ddd}.table>thead:first-child>tr:first-child>th{border-top:0}.table-bordered{border:1px solid #ddd}.table-bordered>tbody>tr>td,.table-bordered>thead>tr>th{border:1px solid #000000;vertical-align:middle}.table-bordered>thead>tr>th{border-bottom-width:2px}.table-striped>tbody>tr:nth-of-type(odd){background-color:#063a52}.table-hover>tbody>tr:hover{background-color:#063a52}@media screen and (max-width:767px){.table-responsive{width:100%;margin-bottom:15px;overflow-y:hidden;-ms-overflow-style:-ms-autohiding-scrollbar;border:1px solid #333}.table-responsive>.table{margin-bottom:0}.table-responsive>.table>tbody>tr>td,.table-responsive>.table>thead>tr>th{white-space:nowrap}.table-responsive>.table-bordered{border:0}.table-responsive>.table-bordered>tbody>tr>td:first-child,.table-responsive>.table-bordered>thead>tr>th:first-child{border-left:0}.table-responsive>.table-bordered>tbody>tr>td:last-child,.table-responsive>.table-bordered>thead>tr>th:last-child{border-right:0}.table-responsive>.table-bordered>tbody>tr:last-child>td{border-bottom:0}}.table-head{text-align:center;background:linear-gradient(to right, #063a52 , #000000)}.list{margin-bottom:1rem}ul li{display:inline;padding:0 8px;border-right:1px solid #fff}ul li:last-child{border:none}
+        table.SLOT td, table.SLOT th {
+          border: 1px solid #063a52;
+        }
+        table.SLOT tbody td {
+          font-size: 18px;
+          color: #ffffff;
       padding: 5px;
-      font-size: 110%;
-    }
-
-    .status {
-      margin: 0;
-      margin-bottom: 20px;
-      padding: 10px;
-      font-size: 80%;
-      background: #EEE;
-      border: 1px dotted #DDD;
-    }
-
-    .status--ERROR {
-      background-color: red;
-      color: white;
-      font-size: 120%;
-    }
-
-    .status--SUCCESS {
-      background-color: green;
-      font-weight: bold;
-      color: white;
-      font-size: 120%
-    }
-
-    .small {
-      font-size: 0.7rem;
-      font-weight: normal;
-    }
-
-    .version {
-      font-size: 80%;
-    }
-
-    .form-field {
-      border: 1px solid #AAA;
-      padding: 8px;
-      width: 280px;
-    }
-
-    .info {
-      margin-top: 0;
-      font-size: 80%;
-      color: #777;
-    }
-
-    .submit {
-      background-color: #378de5;
-      border: 0;
-      color: #ffffff;
-      font-size: 15px;
-      padding: 10px 24px;
-      margin: 20px 0 20px 0;
-      text-decoration: none;
-    }
-
-    .submit:hover {
-      background-color: #2c6db2;
-      cursor: pointer;
-    }
-    -->
-  </style>
+      font-family: Calibri;
+        }
+        table.SLOT thead {
+          background: #063a52;
+      font-family: Calibri;
+        }
+        table.SLOT thead th {
+          font-size: 22px;
+          color: #fff;
+          text-align: center;
+      font-family: Calibri;
+        }
+</style>
+<script async src="https://cdn.ampproject.org/v0.js"></script>
+<script async custom-element="amp-anim" src="https://cdn.ampproject.org/v0/amp-anim-0.1.js"></script>
 </head>
 <body>
-<p class="status status--<?php echo strtoupper(key($GLOBALS['status'])); ?>">
-  Status: <?php echo reset($GLOBALS['status']); ?><br/>
-  <span class="small">Processing Time: <?php echo $time; ?> seconds</span>
-</p>
-<form action="" method="POST">
-  <fieldset>
-    <h1>Archive Unzipper</h1>
-    <label for="zipfile">Select .zip or .rar archive or .gz file you want to extract:</label>
-    <select name="zipfile" size="1" class="select">
-      <?php foreach ($unzipper->zipfiles as $zip) {
-        echo "<option>$zip</option>";
-      }
-      ?>
-    </select>
-    <label for="extpath">Extraction path (optional):</label>
-    <input type="text" name="extpath" class="form-field" />
-    <p class="info">Enter extraction path without leading or trailing slashes (e.g. "mypath"). If left empty current directory will be used.</p>
-    <input type="submit" name="dounzip" class="submit" value="Unzip Archive"/>
-  </fieldset>
+<div class="navbar">
+  <div class="container">
+    <div class="row">
+      <div class="col-md-12 konten-domino">
+        <div class="logomobi">
+<amp-img src=
+"https://res.cloudinary.com/jandamuda02/image/upload/v1658188265/SV388-1_n9docy.png"
+        width="340" height="65" 
+        layout="responsive" alt="sv388">
+    </amp-img>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="clear"></div>
+<div class="content">
+  <div class="container">
+    <div class="row tukangcopy">
+      <div class="tengah">
+        <div class="logo konten-domino">
+        <amp-img src=
+"https://res.cloudinary.com/jandamuda02/image/upload/v1658188265/SV388-1_n9docy.png"
+        width="340" height="65" 
+        layout="responsive" alt="sv388">
+    </amp-img>
+        </div>
+      </div>
+    </div>
+    <div class="row my-2 tukangcopy">
+      <div class="col-md-12">
+        <div class="marquee-text" style="background-color:#212121;color:#000; padding: 5px 0; border: 1px solid #063a52; border-radius: 3px;">
+          <div style="font-family: 'Arial'; font-size:15px;">SV388 Situs Sabung Ayam Online Terpercaya</div>
+        </div>
+      </div>
+    </div>
+  </div>  
+</div>
 
-  <fieldset>
-    <h1>Archive Zipper</h1>
-    <label for="zippath">Path that should be zipped (optional):</label>
-    <input type="text" name="zippath" class="form-field" />
-    <p class="info">Enter path to be zipped without leading or trailing slashes (e.g. "zippath"). If left empty current directory will be used.</p>
-    <input type="submit" name="dozip" class="submit" value="Zip Archive"/>
-  </fieldset>
-</form>
-<p class="version">Unzipper version: <?php echo VERSION; ?></p>
+<div class="container">
+  <table class="table table-dark table-striped table-hover table-bordered mb-0">
+    <thead class="bg-dark">
+      <tr class="table-head">
+        <th>
+          <b>Nama Situs</b>
+        </th>
+        <th class="d-none d-sm-table-cell">
+          <b>MIN DEPOSIT</b>
+        </th>
+        <th class="d-none d-sm-table-cell">
+          <b>MIN WITHDRAW</b>
+        </th>
+        <th id="games">
+          <b>LINK RESMI</b>
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <b>AKUN VVIP</b>
+        </td>
+        <td class="d-none d-sm-table-cell">Rp 10.000</td>
+        <td class="d-none d-sm-table-cell">Rp 50.000</td>
+        <td>
+          <a class="button" href="#" target="_blank" rel="nofollow noopener">DAFTAR</a>        </th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <b>AKUN VVIP</b>
+        </td>
+        <td class="d-none d-sm-table-cell">Rp 10.000</td>
+        <td class="d-none d-sm-table-cell">Rp 50.000</td>
+        <td>
+          <a class="button" href="#" target="_blank" rel="nofollow noopener">LIVECHAT</a>
+        </td>
+      </tr>
+      <tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="container">
+    <div id="banner_carousel" class="carousel slide" data-ride="carousel">
+        <div class="carousel-inner">
+            <amp-carousel height="350px" width="840px" layout="responsive" type="slides" autoplay delay="4000">
+                <div class="item active">
+                <amp-img src="https://iforum-sg.c.huawei.com/dddd/id/images/2023/3/20/d93684b5-a29e-48d0-b9fd-3074452073d8.jpg" rel="nofollow" height="350px" width="840px" layout="responsive"></amp-img></a>
+                </div>
+            </amp-carousel>
+        </div>    
+        </div>
+        </div>
+        <br>
+                <div class="container">
+                                    <table class="SLOT" style="width:100%">
+                                        <thead>
+                                            <tr>
+                                               <th colspan="3">INFORMASI TENTANG SITUS
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                           <tr>
+                                                <td>Situs :</td>
+                                                
+                                                <td>📢 sv388</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Jenis Permainan :</td>
+                                                
+                                                <td>🎰 adu ayam, laga ayam, sabung ayam, tarung ayam</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Mata Uang :</td>
+                                                
+                                                <td>💲 IDR ( Indonesian Rupiah )</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Sistem Deposit :</td>
+                                                
+                                                <td>🏧 BCA, 🏧 BNI, 🏧 BRI, 🏧 Mandiri, 🏧 CIMB Niaga</td>
+                                            </tr>
+                                            <tr>
+                                                <td>Deposit E-Wallet :</td>
+                                                
+                                                <td>📱 Dana, 📱 Ovo, 📱 Gopay, 📱 Link Aja</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                </div>
+<br>    
+<div class="bottom bg-dark">
+  <div class="container">
+    <div class="row mb-3" style="background-color: #020202;">
+      <div class="col-md-12 pb-5 konten-domino">
+        <div class="konten">
+<div class="main_title" style="text-align: justify;"><header>
+<h1 style="text-align: center;">SV388 Situs Judi Sabung Ayam Online Terpercaya</h1>
+<hr />
+</p>
+<h1>SV388 Situs Sabung Ayam Online Terpercaya</h1>
+<p>Selamat datang di dunia sabung ayam online yang semakin populer dan mendebarkan! Jika Anda mencari situs judi sabung ayam terpercaya, maka SV388 adalah pilihan yang tepat. SV388 telah menjadi pilihan utama bagi para pecinta sabung ayam online di Indonesia karena menawarkan keunggulan dan kenyamanan untuk bermain. Dalam artikel ini, kami akan membahas lebih detail mengenai alasan mengapa SV388 menjadi situs judi sabung ayam terpercaya, jenis taruhan yang ditawarkan, serta panduan cara melakukan daftar hingga deposit. Ayo baca terus artikel ini untuk menemukan semua informasi penting tentang SV388!</p>
+<h2>SV388 Situs Sabung Ayam Online Terpercaya</h2>
+<p>SV388 Situs Sabung Ayam Online Terpercaya<br><br>Sabung ayam telah menjadi salah satu permainan tradisional yang populer di Indonesia. Namun, dengan adanya teknologi dan internet, kini Anda bisa memainkan sabung ayam secara online melalui situs judi sabung ayam terpercaya seperti SV388.<br><br>Alasan Mengapa SV388 Menjadi Situs Judi Sabung Ayam Terpercaya<br><br>SV388 telah berhasil menarik perhatian para pemain sabung ayam online karena memiliki keamanan dan privasi yang terjamin serta memberikan pengalaman bermain yang menyenangkan. Dalam hal ini, SV388 bekerja sama dengan beberapa provider ternama seperti S1288 dan CF88 untuk menghadirkan layanan berkualitas tinggi bagi para pemainnya.<br><br>Keunggulan dari SV388<br><br>Salah satu kelebihan dari SV388 adalah tampilannya yang user-friendly sehingga mudah digunakan oleh siapa saja. Selain itu, jenis taruhan yang ditawarkan juga sangat bervariasi mulai dari taruhan besar hingga small bet. Hal ini tentu saja membuat para pemain merasa lebih leluasa dalam memilih jenis taruhan sesuai dengan kemampuan finansial mereka.<br><br>Jenis Taruhan yang Ditawarkan di SV388<br><br>Ada banyak jenis taruhan yang ditawarkan di situs judi sabung ayam terpercaya ini. Mulai dari pilihan tim atau sisi mana yang akan menang hingga durasi pertandingan atau waktu saat pertandingan dimulai. Setiap jenis taruhan memiliki nilai odds masing-masing sehingga para pemain dapat memperhitungan risiko sebelum melakukan betting.<br><br>Prosedur Daftar di SV388 <br><br>Untuk bergabung sebagai anggota di SV388 sangatlah mudah. Anda hanya perlu mengisi formul</p>
+<h2>Alasan Mengapa SV388 Menjadi Situs Judi Sabung Ayam Terpercaya</h2>
+<p>SV388 merupakan situs judi sabung ayam online terpercaya yang sangat diminati oleh para pecinta sabung ayam. Ada beberapa alasan mengapa SV388 menjadi pilihan utama bagi banyak orang dalam bermain sabung ayam secara online.<br><br>Pertama, keamanan dan privasi member dijamin oleh SV388. Situs ini menggunakan sistem keamanan terbaik untuk melindungi data dan informasi pribadi setiap membernya dari akses tidak sah.<br><br>Kedua, SV388 menyediakan layanan pelanggan yang responsif dan ramah selama 24 jam. Hal ini memudahkan para pemain untuk mendapatkan bantuan kapan saja jika mereka mengalami masalah atau kendala saat bermain.<br><br>Selain itu, permainan yang ditawarkan di SV388 memiliki kualitas unggul dengan tampilan grafis yang menarik serta fitur-fitur tambahan seperti live streaming pertandingan secara langsung. Sehingga pengalaman bermain pun semakin seru dan menyenangkan.<br><br>Terakhir, taruhan pada Sabung Ayam di SV388 juga tergolong cukup murah dibandingkan situs lainnya sehingga dapat dijangkau oleh semua kalangan pemain tanpa harus merogoh kocek terlalu dalam.<br><br>Oleh karena itu, tidak heran jika SV388 menjadi salah satu situs judi sabung ayam online terpercaya yang banyak dipilih oleh para pecinta sabung ayam dari seluruh Indonesia.</p>
+<h2>Keunggulan dari SV388</h2>
+<p>Keunggulan dari SV388 sebagai situs judi sabung ayam online terpercaya sangatlah banyak dan tidak dapat diremehkan. Pertama, SV388 menyediakan platform yang aman dan terjamin keamanannya untuk para pengguna melalui sistem enkripsi data yang canggih. Selain itu, situs ini juga dilengkapi dengan fitur anti-bot dan cheat sehingga memastikan bahwa setiap permainan berlangsung secara fair.<br><br>SV388 juga menawarkan berbagai jenis taruhan mulai dari taruhan pemenang hingga taruhan bervolume besar seperti meron atau wala serta colok bebas dalam setiap pertandingan sabung ayam. Keberagaman jenis taruhan ini membuat pemain dapat memilih jenis taruhan sesuai dengan strategi mereka sendiri.<br><br>Tidak hanya itu, layanan customer service di SV388 tersedia 24 jam sehari selama tujuh hari seminggu untuk membantu pemain ketika mengalami kesulitan saat melakukan transaksi atau bertaruh. Dengan begitu, pemain akan merasa lebih nyaman karena ada tim support yang siap memberikan bantuan kapan saja.<br><br>Terakhir namun tidak kalah pentingnya adalah bonus-bonus yang diberikan oleh SV388 kepada para pemainnya termasuk bonus deposit awal maupun cashback mingguan. Hal ini tentunya menjadi nilai tambah bagi para pemain dalam meningkatkan modal mereka untuk bertaruh pada pertandingan sabung ayam di situs judi online terbaik dan tepercaya - SV388!</p>
+<h2>Jenis Taruhan yang Ditawarkan di SV388</h2>
+<p>SV388 adalah sebuah situs judi sabung ayam online terpercaya yang menawarkan berbagai jenis taruhan pada setiap pertandingan. Taruhan tersebut dapat dilakukan oleh para pemain untuk memenangkan uang dalam waktu singkat.<br><br>Salah satu jenis taruhan yang ditawarkan di SV388 adalah taruhan Wala-Merah, dimana pemain bertaruh pada ayam merah atau hitam sebagai pemenangnya. Selain itu, terdapat juga taruhan BDD atau Both Death Draw, dimana pemain bertaruh bahwa kedua ayam akan tewas dalam waktu bersamaan.<br><br>Terdapat pula jenis taruhan lain seperti Over Under atau Total Goal dan 1x2 Double Chance. Pada jenis taruhan ini, pemain akan menebak jumlah total goal atau kemenangan dari salah satu tim dengan odds yang telah ditentukan sebelumnya.<br><br>Untuk meningkatkan peluang menang di setiap pertandingan sabung ayam, SV388 juga menawarkan live streaming secara gratis kepada para membernya. Dengan adanya fitur tersebut, para pemain dapat melihat langsung kondisi dan performa dari masing-masing ayam sebelum melakukan taruhan.<br><br>Dalam hal ini SV388 menjadi salah satu situs judi sabung ayam online terpercaya karena menyediakan banyak variasi permainan serta fitur tambahan yang membantu para member untuk meraih kemenangan lebih mudah dan cepat sehingga membuat pengalaman berjudinya menjadi lebih seru dan menguntungkan.</p>
+<h2>Prosedur Daftar di SV388</h2>
+<p>Prosedur Daftar di SV388<br><br>Untuk bergabung dengan situs judi sabung ayam online terpercaya, seperti SV388, Anda harus mendaftar terlebih dahulu. Berikut adalah prosedur daftar yang harus dilakukan:<br><br>1. Kunjungi website resmi SV388 dan klik tombol "Daftar" pada bagian atas halaman.<br>2. Isi formulir pendaftaran dengan informasi yang benar dan lengkap, seperti nama lengkap, nomor telepon, email, username dan password.<br>3. Pastikan bahwa semua informasi yang diberikan sudah sesuai sebelum mengklik tombol "Submit".<br>4. Tunggu beberapa saat hingga sistem memberikan konfirmasi keberhasilan dalam proses pendaftaran.<br><br>Setelah berhasil mendaftar di SV388, Anda akan dapat menikmati berbagai jenis taruhan sabung ayam online yang ditawarkan oleh situs ini. Sebagai pemain baru, jangan lupa untuk mempelajari ketentuan serta aturan main dari setiap jenis taruhan tersebut agar bisa mendapatkan kesempatan menang lebih besar.<br><br>Penting juga untuk selalu menjaga kerahasiaan data login akun Anda demi kenyamanan dan keamanan dalam bermain di situs judi online manapun termasuk didalamnya adalah SV 88 Sabung Ayam Online Terpercaya ini.</p>
+<h2>Cara Melakukan Deposit di SV388</h2>
+<p>Jika Anda ingin bergabung dan bermain di SV388, pertama-tama Anda harus melakukan deposit terlebih dahulu. Deposit adalah proses mengirimkan uang ke akun Anda di situs judi sabung ayam online tersebut agar dapat digunakan untuk bertaruh.<br><br>Cara pertama untuk melakukan deposit di SV388 adalah dengan transfer bank. Silakan pilih bank yang tersedia seperti BCA, Mandiri, BRI atau CIMB Niaga. Setelah itu, masukkan nomor rekening tujuan yang akan diberikan oleh customer service melalui live chat atau WhatsApp.<br><br>Selain transfer bank, cara lainnya untuk melakukan deposit adalah dengan menggunakan aplikasi e-wallet seperti OVO dan GoPay. Langkah-langkahnya hampir sama dengan transfer bank namun pada tahap pengisian nominal bisa langsung dilakukan melalui aplikasi tersebut.<br><br>Pastikan bahwa saat mengisi form deposit, jumlah uang yang dimasukkan sudah sesuai dengan aturan minimal dan maksimal setiap metode pembayaran yang ditetapkan oleh SV388. Jangan lupa juga memastikan bahwa nama pemilik rekening sumber transfer harus sama persis dengan nama pemilik akun di situs ini.<br><br>Dalam waktu kurang dari 5 menit setelah konfirmasi deposit berhasil dilakukan oleh CS SV388 maka saldo dalam akun Anda sudah ter-update secara otomatis dan siap digunakan untuk bertaruh dalam permainan sabung ayam online!</p>
+<p>Dari ulasan di atas, dapat disimpulkan bahwa SV388 merupakan situs sabung ayam online terpercaya yang menawarkan banyak keunggulan dan jenis taruhan yang beragam. Selain itu, prosedur daftar dan deposit di SV388 juga mudah dilakukan sehingga pemain dapat dengan cepat memulai permainan. Tidak hanya itu, customer service yang ramah dan responsif juga menjadi nilai tambah dari situs ini.<br><br>Jika Anda mencari situs judi sabung ayam online terbaik, maka SV388 adalah pilihan tepat untuk Anda. Dengan berbagai fitur unggulan serta keamanan data yang terjamin, Anda bisa merasakan pengalaman bermain sabung ayam online dengan tenang dan nyaman. Jangan ragu untuk bergabung bersama SV388 sekarang juga!</p>
+                    </div>
+    </div>
+  </div>
+  <div class="container">
+    <div class="kolongramen konten-domino pb-2">
+      <span><center>Copyright &copy; sv388</center></span>
+    </div>
+  </div>
+</div>
 </body>
 </html>
